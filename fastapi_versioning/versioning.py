@@ -46,10 +46,6 @@ def VersionedFastAPI(
 ) -> FastAPI:
     parent_app = FastAPI(
         title=app.title,
-        on_startup=app.router.on_startup,
-        on_shutdown=app.router.on_shutdown,
-        docs_url=app.docs_url,
-        redoc_url=app.redoc_url,
         **kwargs,
     )
     version_route_mapping: Dict[Tuple[int, int], List[APIRoute]] = defaultdict(list)
