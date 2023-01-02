@@ -1,5 +1,4 @@
-from collections import defaultdict
-from typing import Any, Callable, Dict, List, Tuple, TypeVar, cast, Optional
+from typing import Any, Callable, Dict, Tuple, TypeVar, cast, Optional
 
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
@@ -8,97 +7,78 @@ from starlette.routing import BaseRoute
 CallableT = TypeVar("CallableT", bound=Callable[..., Any])
 
 
-def unversion() -> Callable[[CallableT], CallableT]:
-    def decorator(func: CallableT) -> CallableT:
-        func._ignore = True  # type: ignore
-        return func
+class VersionedFastAPI(FastAPI):
+    def __init__(
+        self,
+        *args,
+        route_version_metadata: Dict[str, str] = {
+            "version_format": "{major}.{minor}",
+            "prefix_format": "/v{major}_{minor}",
+        },
+        **extra: Any
+    ) -> None:
+        super().__init__(*args, **extra)
+        self.route_version_mounts: Dict[str, FastAPI] = {}
+        self.route_version_metadata = route_version_metadata
+        self.route_latest_version = 0
 
-    return decorator
-
-
-def version(major: int, minor: int = 0) -> Callable[[CallableT], CallableT]:
-    def decorator(func: CallableT) -> CallableT:
-        func._api_version = (major, minor)  # type: ignore
-        return func
-
-    return decorator
-
-
-def version_to_route(
-    route: BaseRoute,
-    default_version: Tuple[int, int],
-) -> Optional[Tuple[Tuple[int, int], APIRoute]]:
-    api_route = cast(APIRoute, route)
-    if getattr(api_route.endpoint, "_ignore", False):
-        return None
-    else:
-        version = getattr(api_route.endpoint, "_api_version", default_version)
-        return version, api_route
-
-
-def VersionedFastAPI(
-    app: FastAPI,
-    version_format: str = "{major}.{minor}",
-    prefix_format: str = "/v{major}_{minor}",
-    default_version: Tuple[int, int] = (1, 0),
-    enable_latest: bool = False,
-    **kwargs: Any,
-) -> FastAPI:
-    parent_app = FastAPI(
-        title=app.title,
-        on_startup=app.router.on_startup,
-        on_shutdown=app.router.on_shutdown,
-        **kwargs,
-    )
-    version_route_mapping: Dict[Tuple[int, int], List[APIRoute]] = defaultdict(list)
-
-    for route in app.routes:
-        _version_route = version_to_route(route, default_version)
-        if _version_route is None:
-            # unversioned routes do not get included into the mounts
-            parent_app.router.routes.append(route)
+    def version_to_route(
+        self,
+        route: BaseRoute,
+        default_version: Tuple[int, int],
+    ) -> Optional[Tuple[Tuple[int, int], APIRoute]]:
+        api_route = cast(APIRoute, route)
+        if getattr(api_route.endpoint, "_ignore", False):
+            return None
         else:
-            version, route = _version_route
-            version_route_mapping[version].append(route)
+            version = getattr(api_route.endpoint, "_api_version", default_version)
+            return version, api_route
 
-    unique_routes = {}
-    versions = sorted(version_route_mapping.keys())
-    for version in versions:
-        major, minor = version
-        prefix = prefix_format.format(major=major, minor=minor)
-        semver = version_format.format(major=major, minor=minor)
-        versioned_app = FastAPI(
-            title=app.title,
-            description=app.description,
-            version=semver,
-            docs_url=app.docs_url,
-            redoc_url=app.redoc_url
+    def get(self, *args, route_version: float = 0, **kwds):
+        route_version = float(route_version)
+        if route_version == 0:
+            return super().get(*args, **kwds)
+
+        if route_version > self.route_latest_version:
+            self.route_latest_version = route_version
+
+        major, minor = repr(route_version).split(".")
+
+        version_key = self.route_version_metadata["version_format"].format(
+            major=major, minor=minor
         )
-        for route in version_route_mapping[version]:
-            for method in route.methods:
-                unique_routes[route.path + "|" + method] = route
-        for route in unique_routes.values():
-            versioned_app.router.routes.append(route)
-        parent_app.mount(prefix, versioned_app)
+        if version_key not in self.route_version_mounts:
+            prefix = self._get_route_version_prefix(major=major, minor=minor)
+            addon = self.new_versioned_mount(self, prefix[1:])
+            self.route_version_mounts[version_key] = addon
+            self.mount(prefix, addon)
 
-        @parent_app.get(f"{prefix}/openapi.json", name=semver, tags=["Versions"])
-        @parent_app.get(f"{prefix}/docs", name=semver, tags=["Documentations"])
-        def noop() -> None:
-            ...
+        return self.route_version_mounts[version_key].get(*args, **kwds)
 
-    if enable_latest:
+    def _get_route_version_prefix(self, major: str, minor: str):
+        return (
+            self.route_version_metadata["prefix_format"]
+            .format(major=major, minor=minor)
+            .replace("_0", "")
+        )
+
+    @staticmethod
+    def new_versioned_mount(parent: FastAPI, version_key: str) -> FastAPI:
+        return FastAPI(
+            title=parent.title, description=parent.description, version=version_key
+        )
+
+    def enable_latest(self):
         prefix = "/latest"
-        major, minor = version
-        semver = version_format.format(major=major, minor=minor)
-        versioned_app = FastAPI(
-            title=app.title,
-            description=app.description,
-            version=semver,
-            docs_url=app.docs_url,
-            redoc_url=app.redoc_url
+        major, minor = repr(self.route_latest_version).split(".")
+        version_key = self.route_version_metadata["version_format"].format(
+            major=major, minor=minor
         )
-        for route in unique_routes.values():
-            versioned_app.router.routes.append(route)
-        parent_app.mount(prefix, versioned_app)
+        latest_app = self.new_versioned_mount(
+            self,  f"latest{self._get_route_version_prefix(major, minor)}"
+        )
+        for route in self.route_version_mounts[version_key].router.routes:
+            latest_app.router.routes.append(route)
 
-    return parent_app
+        self.route_version_mounts["latest"] = latest_app
+        self.mount(prefix, latest_app)
