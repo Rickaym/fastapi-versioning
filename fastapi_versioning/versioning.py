@@ -11,15 +11,16 @@ class VersionedFastAPI(FastAPI):
     def __init__(
         self,
         *args,
-        route_version_metadata: Dict[str, str] = {
-            "version_format": "{major}.{minor}",
-            "prefix_format": "/v{major}_{minor}",
-        },
-        **extra: Any
+        prefix_format="/v{major}_{minor}",
+        version_format="{major}.{minor}",
+        **extra: Any,
     ) -> None:
         super().__init__(*args, **extra)
         self.route_version_mounts: Dict[str, FastAPI] = {}
-        self.route_version_metadata = route_version_metadata
+        self.route_version_metadata = {
+            "prefix_format": prefix_format,
+            "version_format": version_format,
+        }
         self.route_latest_version = 0
 
     def version_to_route(
@@ -69,13 +70,16 @@ class VersionedFastAPI(FastAPI):
         )
 
     def enable_latest(self):
-        prefix = "/latest"
+        prefix = (
+            "/".join(self.route_version_metadata["prefix_format"].split("/")[:-1])
+            + "/latest"
+        )
         major, minor = repr(self.route_latest_version).split(".")
         version_key = self.route_version_metadata["version_format"].format(
             major=major, minor=minor
         )
         latest_app = self.new_versioned_mount(
-            self,  f"latest{self._get_route_version_prefix(major, minor)}"
+            self, f"latest{self._get_route_version_prefix(major, minor)}"
         )
         for route in self.route_version_mounts[version_key].router.routes:
             latest_app.router.routes.append(route)
